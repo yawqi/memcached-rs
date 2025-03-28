@@ -3,6 +3,9 @@ use crate::session::Session;
 
 use color_eyre::Report;
 use tokio::net::TcpListener;
+use tokio::select;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::mpsc::Sender;
 use tracing::info;
 
 use std::array;
@@ -13,7 +16,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug)]
 pub struct Server {
     listener: TcpListener,
-    worker_channels: Vec<tokio::sync::mpsc::Sender<Arc<Session>>>,
+    worker_channels: Vec<Sender<Session>>,
     workers: Vec<tokio::task::JoinHandle<()>>,
 
     inner: Arc<Inner>,
@@ -29,11 +32,11 @@ impl Server {
         let mut workers = vec![];
 
         for _ in 0..worker_count {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Session>(32);
             let handle = tokio::spawn(async move {
-                while let Some(_) = rx.recv().await {
-                    info!("helloworld1");
-                    info!("helloworld2");
+                while let Some(session) = rx.recv().await {
+                    info!("hello world");
+                    session.handle().await;
                 }
             });
 
@@ -58,22 +61,44 @@ impl Server {
             let mut sessions = self.inner.sessions.lock().unwrap();
             let sess = sessions
                 .entry(client_addr)
-                .or_insert(Arc::new(Session::new(Arc::clone(&self.inner), stream)));
+                .or_insert(Session::new(Arc::downgrade(&self.inner), stream));
 
             self.worker_channels[counter]
-                .send(Arc::clone(sess))
+                .send(sess.clone())
                 .await
                 .unwrap();
 
             counter = (counter + 1) % self.worker_channels.len();
         }
     }
+
+    pub async fn wait_for_shutdown(&self) {
+        let mut intr_signal = signal(SignalKind::interrupt()).unwrap();
+        let mut term_signal = signal(SignalKind::terminate()).unwrap();
+        let mut quit_signal= signal(SignalKind::quit()).unwrap();
+
+        select! {
+            _ = intr_signal.recv() => {
+                info!("Received SIGINT");
+            }
+            _ = term_signal.recv() => {
+                info!("Received SIGTERM");
+            }
+            _ = quit_signal.recv() => {
+                info!("Received SIGQUIT");
+            }
+        }
+
+        // for worker in self.workers.drain(..) {
+        //     worker.await.unwrap();
+        // }
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct Inner {
     items: [Mutex<HashSet<Item>>; 4096],
-    sessions: Mutex<HashMap<SocketAddr, Arc<Session>>>,
+    sessions: Mutex<HashMap<SocketAddr, Session>>,
 }
 
 impl Inner {

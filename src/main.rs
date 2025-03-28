@@ -1,9 +1,11 @@
 mod item;
+mod protocol;
 mod server;
 mod session;
 
 use clap::Parser;
 use color_eyre::Report;
+use tokio::select;
 
 #[derive(Parser, Debug)]
 #[clap(about, long_about, version)]
@@ -34,7 +36,11 @@ async fn main() -> Result<(), Report> {
         .init();
 
     let server = server::Server::setup(args.port()).await?;
-    server.run().await;
+
+    select! {
+        _ = server.run() => {},
+        _ = server.wait_for_shutdown() => {},
+    }
 
     Ok(())
 }
